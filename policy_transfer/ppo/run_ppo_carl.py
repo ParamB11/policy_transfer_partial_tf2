@@ -1,17 +1,28 @@
+'''
+Copy of run_ppo. The main difference is that the environment is created using CARL instead of PyDart2.
+'''
 #!/usr/bin/env python
 from baselines.common import set_global_seeds, tf_util as U
 from baselines import bench
-import os.path as osp
-import gym, logging
-import policy_transfer.envs
 from baselines import logger
-import sys
+from carl.context.selection import RoundRobinSelector, StaticSelector
+from carl.envs import CARLLunarLander, CARLPendulum
+import gym
+from gymnasium import spaces
+from gymnasium.wrappers import FlattenObservation, FilterObservation
 import joblib
-import tensorflow as tf
+import logging
 import numpy as np
+import os.path as osp
+import sys
+import tensorflow as tf
 from mpi4py import MPI
+
+# sys.path.append('/home/param/crl_notebooks')
+# import policy_transfer.envs
 from policy_transfer.policies.mirror_policy import *
 from policy_transfer.policies.mlp_policy import MlpPolicy
+from ..crl_py.custom_wrappers import ToGymnasiumActionSpace
 
 output_interval = 10
 
@@ -36,39 +47,33 @@ def train(env_id, num_timesteps, seed, batch_size, clip, schedule, mirror, warms
     U.make_session(num_cpu=1).__enter__()
     set_global_seeds(seed)
 
-    if env_id == 'Minitaur':
-        from pybullet_envs.minitaur.envs import minitaur_reactive_env
-        from gym.wrappers import time_limit
-        env = time_limit.TimeLimit(minitaur_reactive_env.MinitaurReactiveEnv(render=False,
-                                                         accurate_motor_model_enabled=True,
-                                                         urdf_version='rainbow_dash_v0',
-                                                         train_UP=False,
-                                                         resample_MP=False), max_episode_steps=1000)
-    else:
-        env = gym.make(env_id)
-        if train_up:
-            print('Inside if train_up.') #custom
-            print('env =', env) #custom
-            print('env.env =', env.env) #custom
-            env.env.train_UP = False #custom
-            
-            if env.env.train_UP is not True:
-                env.env.train_UP = True
-                env.env.resample_MP = True
-                from gym import spaces
-                
-                env.env.param_manager.activated_param = dyn_params
-                env.env.param_manager.controllable_param = dyn_params
-                env.env.obs_dim += len(env.env.param_manager.activated_param)
+    # env = gym.make(env_id)
+    carl_env_fn = eval(env_id)
+    
+    if train_up:
+        
+        # if env.env.train_UP is not True:
+        show_context = True # env.env.train_UP = True
+        context_selector = RoundRobinSelector # env.env.resample_MP = True
+        # from gym import spaces
+        
+        # env.env.param_manager.activated_param = dyn_params
+        # env.env.param_manager.controllable_param = dyn_params
+        # env.env.obs_dim += len(env.env.param_manager.activated_param)
 
-                high = np.inf * np.ones(env.env.obs_dim)
-                low = -high
-                env.env.observation_space = spaces.Box(low, high)
-                env.observation_space = spaces.Box(low, high)
+        # high = np.inf * np.ones(env.env.obs_dim)
+        # low = -high
+        # env.env.observation_space = spaces.Box(low, high)
+        # env.observation_space = spaces.Box(low, high)
+        tenv = carl_env_fn(contexts=context_dict, 
+                           obs_context_features=list(context_dict[0].keys()), context_selector=RoundRobinSelector)
+        if not isinstance(tenv.action_space, supported_spaces):
+            tenv = ToGymnasiumActionSpace(tenv)
+        env = FlattenObservation(FilterObservation(tenv, filter_keys=["obs", "context"]))
 
-                if hasattr(env.env, 'obs_perm'):
-                    obpermapp = np.arange(len(env.env.obs_perm), len(env.env.obs_perm) + len(env.env.param_manager.activated_param))
-                    env.env.obs_perm = np.concatenate([env.env.obs_perm, obpermapp])
+        # if hasattr(env.env, 'obs_perm'):
+        #     obpermapp = np.arange(len(env.env.obs_perm), len(env.env.obs_perm) + len(env.env.param_manager.activated_param))
+        #     env.env.obs_perm = np.concatenate([env.env.obs_perm, obpermapp])
 
     with open(logger.get_dir()+"/envinfo.txt", "w") as text_file:
         text_file.write(str(env.env.__dict__))
@@ -122,7 +127,7 @@ def main():
     parser.add_argument('--clip', help='clip', type=float, default=0.2)
     parser.add_argument('--schedule', help='schedule', default='constant')
     parser.add_argument('--train_up', help='whether train up', default='True')
-    parser.add_argument('--dyn_params', action='append', type=int)
+    parser.add_argument('--dyn_params', action='append', type=str)
     parser.add_argument('--output_interval', help='interval of outputting policies', type=int, default=10)
     parser.add_argument('--mirror', help='whether to use mirror, (0: not mirror, 1: hard mirror, 2: soft mirror)', type=int, default=0)
     parser.add_argument('--warmstart', help='path to warmstart policies',
@@ -134,7 +139,6 @@ def main():
     output_interval = args.output_interval
     logger.reset()
     config_name = 'data/ppo_'+args.env+str(args.seed)+'_'+args.name
-    print('args.dyn_params =', args.dyn_params)
 
     if args.mirror == 1:
         config_name += '_mirror'
